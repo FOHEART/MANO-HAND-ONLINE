@@ -32,6 +32,32 @@ python -m http.server 8765
 
 Open `http://localhost:8765/` and drop the pkl into the modal.
 
+#### One-click launcher (same thing, less typing)
+
+| Platform | Do this | What happens |
+| --- | --- | --- |
+| Windows | double-click `serve.bat` | starts the server on port 8765 and opens the browser |
+| macOS / Linux | `./serve.sh` | same |
+| Any | `python serve.py` | same, if you prefer the terminal |
+
+`serve.py` is the actual launcher; `serve.bat` / `serve.sh` just locate a
+Python 3 interpreter and hand over to it. Useful flags:
+
+```bash
+python serve.py --port 9000     # use another port
+python serve.py --no-browser    # start the server only
+python serve.py --bind 0.0.0.0  # expose it on your local network
+```
+
+Notes:
+
+- It binds to `127.0.0.1` by default, so nothing is exposed to your LAN
+  unless you pass `--bind 0.0.0.0`.
+- If the port is busy it automatically moves to the next free one and
+  prints the URL it actually used.
+- On macOS, `chmod +x serve.sh` first, or rename a copy to `serve.command`
+  to get a double-clickable file.
+
 ## License
 
 - **Viewer code**: MIT.

@@ -1,8 +1,6 @@
 # MANO model & derived data — non-commercial license, must NOT be committed.
 # Users must download MANO themselves from https://mano.is.tue.mpg.de
-mano_v1_2/
-mano_right.bin
-mano_right.json
+
 
 # Caches / OS noise
 __pycache__/
