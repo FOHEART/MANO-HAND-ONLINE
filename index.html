@@ -32,7 +32,6 @@
 }
 </script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500&family=Syne:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -79,7 +78,7 @@ body.light{
 html,body{height:100%;overflow:hidden;background:var(--bg)}
 body{display:flex;font-family:'JetBrains Mono',monospace;color:var(--text);transition:background .25s,color .25s}
 #canvas-wrap{flex:1;position:relative;background:var(--scene);transition:background .25s}
-canvas{display:block;width:100%!important;height:100%!important}
+canvas{display:block;width:100%!important;height:100%!important;cursor:grab;touch-action:none}
 #panel{width:360px;background:var(--panel);border-left:1px solid var(--border);overflow-y:auto;display:flex;flex-direction:column;flex-shrink:0;transition:background .25s,border-color .25s}
 #panel::-webkit-scrollbar{width:4px}
 #panel::-webkit-scrollbar-track{background:var(--panel)}
@@ -224,6 +223,7 @@ input[type=range]::-webkit-slider-runnable-track{height:3px;border-radius:2px;ba
     <div class="preset-title">PRESETS</div>
     <div class="preset-btns">
       <button class="preset-btn full" onclick="applyPreset('zero')">Zero (Flat Hand)</button>
+      <button class="preset-btn full" id="spin-pip" onclick="spinIndexPip()">Spin Index PIP (Z) · 0→360° @ 5°/s</button>
     </div>
   </div>
 </div>
@@ -298,6 +298,8 @@ function toggleGroup(headEl) {
 }
 
 function onSlider(ji, axis, val, el) {
+  // Hands off the demo spinner if the user grabs the very slider it drives
+  if (spin.active && ji === SPIN_JOINT && axis === SPIN_AXIS) haltSpin();
   pose[ji][axis] = val;
   document.getElementById(`v_${ji}_${axis}`).textContent = val.toFixed(2);
   const pct = ((val + RANGE) / (2 * RANGE) * 100).toFixed(1) + '%';
@@ -331,10 +333,220 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(35, 1, 0.001, 100);
 camera.position.set(0.15, 0.05, 0.42);
 
-const controls = new THREE.OrbitControls(camera, canvas);
-controls.target.set(0, 0, 0.08);
-controls.enableDamping = true;
-controls.dampingFactor = 0.08;
+// ============================================================
+//  Camera control: trackball (arcball) — hand-written, no addon.
+//
+//  Why OrbitControls had to go:
+//
+//  1. It builds its rotation axes from `camera.up`, and this viewer
+//     overwrites `camera.up` with the *palm/finger* direction (see
+//     resetCameraToPalm). So a "horizontal" drag actually spun the
+//     hand about the finger axis — an axis that has nothing to do
+//     with the screen. The arcball works purely in screen space and
+//     never reads `camera.up`.
+//  2. Turntable math has poles. Drag past one and the view flips;
+//     the camera can also never roll. The arcball is a continuous
+//     rotation group: no poles, free roll, inspect from any side.
+//  3. Tracking is exact. The point of the virtual sphere under the
+//     cursor is followed 1:1, instead of turning by a fixed
+//     fraction of the viewport.
+//
+//  The controller is deliberately STATELESS with respect to the
+//  camera: it reads camera.position / camera.quaternion when a drag
+//  arrives and writes them straight back. resetCameraToPalm() can
+//  therefore slam the camera anywhere without re-syncing us.
+//
+//    left drag  → arcball rotate, with inertial coast on release
+//    right drag → pan (slides the orbit target)
+//    wheel / middle drag → dolly
+//
+//  Note: unlike OrbitControls this does not re-aim the camera every
+//  frame — re-aiming would fight the free roll. Aiming happens once
+//  here, and again after a palm reset.
+// ============================================================
+const CAM_MIN_DIST = 0.05;
+const CAM_MAX_DIST = 4.0;
+
+const camCtrl = {
+  target:    new THREE.Vector3(0, 0, 0.08),
+  mode:      0,                 // 0 idle · 1 rotate · 2 pan · 3 dolly
+  px: 0, py: 0,                 // last pointer position, in client px
+  rectW: 1, rectH: 1,           // canvas size, cached at drag start
+  cx: 0, cy: 0, ballR: 1,       // arcball centre + radius, in px
+  spinAxis:  new THREE.Vector3(1, 0, 0),
+  spinSpeed: 0,                 // rad/s of coasting rotation
+  lastT:     performance.now(),
+  lastMoveT: performance.now(),
+};
+
+// Scratch — the drag path must not allocate (same rule as updateMesh).
+const _qDrag  = new THREE.Quaternion();
+const _vA     = new THREE.Vector3();
+const _vB     = new THREE.Vector3();
+const _vAxis  = new THREE.Vector3();
+const _vOff   = new THREE.Vector3();
+
+// Shoemake's virtual sphere. Inside the ball the point sits on the
+// unit sphere; outside it sits on a hyperboloid sheet, which keeps
+// the mapping continuous instead of clamping to the equator.
+function arcballPoint(sx, sy, out) {
+  const d2 = sx * sx + sy * sy;
+  return (d2 <= 0.5)
+    ? out.set(sx, sy, Math.sqrt(1 - d2)).normalize()
+    : out.set(sx, sy, 0.5 / Math.sqrt(d2)).normalize();
+}
+
+// Shortest-arc rotation taking unit vector a to unit vector b.
+function rotationBetween(a, b, out) {
+  const dot = a.dot(b);
+  if (dot > 1 - 1e-9) return out.set(0, 0, 0, 1);
+  if (dot < -1 + 1e-9) {
+    // Antipodal: any perpendicular axis is a valid 180° turn.
+    if (Math.abs(a.x) < 0.9) _vAxis.set(1, 0, 0); else _vAxis.set(0, 1, 0);
+    _vAxis.crossVectors(a, _vAxis).normalize();
+    return out.setFromAxisAngle(_vAxis, Math.PI);
+  }
+  _vAxis.crossVectors(a, b);
+  return out.set(_vAxis.x, _vAxis.y, _vAxis.z, 1 + dot).normalize();
+}
+
+// Rotate the whole camera about the orbit target by `q`.
+//
+// `local` applies q in the camera's own frame (post-multiply), which is
+// what the arcball produces; otherwise q is a world-axis turn and is
+// pre-multiplied.
+//
+// NOTE — do NOT be tempted to build the world-space turn as
+// `camQ · q · camQ⁻¹`: `conjugate()` only equals the inverse while the
+// quaternion is exactly unit, and it never quite is. With |camQ| = 1+ε
+// that expression has norm (1+ε)² and the result has norm (1+ε)³, so the
+// round-off error TRIPLES on every single mouse move — a few hundred drag
+// events is enough to reach 1e251, then Infinity, then a NaN camera.
+// Post-multiplying sidesteps it: a local rotation needs no inverse at all.
+function camOrbit(q, local) {
+  if (local) camera.quaternion.multiply(q);
+  else       camera.quaternion.premultiply(q);
+  camera.quaternion.normalize();          // stop drift accumulating across drags
+
+  // Rebuild the position from the orientation rather than rotating the
+  // offset vector: keeps the orbit radius exact and needs no inverse.
+  const r = camera.position.distanceTo(camCtrl.target);
+  _vOff.set(0, 0, -1).applyQuaternion(camera.quaternion).multiplyScalar(-r);
+  camera.position.copy(camCtrl.target).add(_vOff);
+}
+
+function camRotateTo(mx, my) {
+  arcballPoint((camCtrl.px - camCtrl.cx) / camCtrl.ballR,
+               -(camCtrl.py - camCtrl.cy) / camCtrl.ballR, _vA);
+  arcballPoint((mx - camCtrl.cx) / camCtrl.ballR,
+               -(my - camCtrl.cy) / camCtrl.ballR,        _vB);
+  // NOTE the reversed argument order. The arcball delta describes the turn that
+  // carries the *surface* from _vA to _vB, i.e. the rotation an object would
+  // need. We are rotating the CAMERA instead, and turning the camera by q turns
+  // the model by q⁻¹ — so the delta has to be built back-to-front or every drag
+  // moves the hand the opposite way to the cursor.
+  rotationBetween(_vB, _vA, _qDrag);
+  camOrbit(_qDrag, true);
+
+  // Remember this step's angular speed so the release can coast. The axis
+  // is carried into world axes so the coast spins like a thrown object
+  // rather than about an axis that keeps turning with the camera.
+  const now = performance.now();
+  const dt  = Math.max((now - camCtrl.lastMoveT) / 1000, 1e-3);
+  camCtrl.lastMoveT = now;
+  const len = Math.hypot(_qDrag.x, _qDrag.y, _qDrag.z);
+  if (len > 1e-6) {
+    const theta = 2 * Math.acos(Math.min(1, Math.abs(_qDrag.w)));
+    camCtrl.spinAxis.set(_qDrag.x, _qDrag.y, _qDrag.z)
+                   .multiplyScalar(1 / len)
+                   .applyQuaternion(camera.quaternion);
+    camCtrl.spinSpeed = Math.min(theta / dt, 12);   // cap: a flick must not blur
+  } else {
+    camCtrl.spinSpeed = 0;
+  }
+}
+
+function camPanBy(dx, dy) {
+  const dist = camera.position.distanceTo(camCtrl.target);
+  const k = (2 * dist * Math.tan(camera.fov * Math.PI / 360)) / (camCtrl.rectH || 1);
+  _vA.set(1, 0, 0).applyQuaternion(camera.quaternion);   // camera right
+  _vB.set(0, 1, 0).applyQuaternion(camera.quaternion);   // camera up
+  _vA.multiplyScalar(-dx * k).addScaledVector(_vB, dy * k);
+  camCtrl.target.add(_vA);
+  camera.position.add(_vA);
+}
+
+function camDollyBy(amount) {
+  _vOff.copy(camera.position).sub(camCtrl.target);
+  _vOff.setLength(THREE.MathUtils.clamp(_vOff.length() * Math.exp(amount),
+                                        CAM_MIN_DIST, CAM_MAX_DIST));
+  camera.position.copy(camCtrl.target).add(_vOff);
+}
+
+function camPointerDown(e) {
+  if (e.button !== 0 && e.button !== 1 && e.button !== 2) return;
+  const r = canvas.getBoundingClientRect();
+  camCtrl.rectW = r.width; camCtrl.rectH = r.height;
+  camCtrl.ballR = Math.max(Math.min(r.width, r.height) * 0.45, 1);
+
+  // Centre the ball on the orbit target, so the model turns under the
+  // cursor rather than about the middle of the viewport.
+  _vA.copy(camCtrl.target).project(camera);
+  camCtrl.cx = (isFinite(_vA.x) ? (_vA.x + 1) * 0.5 : 0.5) * r.width  + r.left;
+  camCtrl.cy = (isFinite(_vA.y) ? (1 - _vA.y) * 0.5 : 0.5) * r.height + r.top;
+
+  camCtrl.px = e.clientX; camCtrl.py = e.clientY;
+  camCtrl.mode = (e.button === 0) ? 1 : (e.button === 2) ? 2 : 3;
+  camCtrl.spinSpeed = 0;
+  camCtrl.lastMoveT = camCtrl.lastT = performance.now();
+  try { canvas.setPointerCapture(e.pointerId); } catch {}
+  canvas.style.cursor = 'grabbing';
+  e.preventDefault();
+}
+
+function camPointerMove(e) {
+  if (camCtrl.mode === 0) return;
+  const mx = e.clientX, my = e.clientY;
+  if (camCtrl.mode === 1)      camRotateTo(mx, my);
+  else if (camCtrl.mode === 2) camPanBy(mx - camCtrl.px, my - camCtrl.py);
+  else                         camDollyBy((my - camCtrl.py) * 0.006);
+  camCtrl.px = mx; camCtrl.py = my;
+  e.preventDefault();
+}
+
+function camPointerUp(e) {
+  if (camCtrl.mode === 0) return;
+  camCtrl.mode = 0;
+  canvas.style.cursor = '';
+  try { if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId); } catch {}
+}
+
+function camWheel(e) {
+  e.preventDefault();
+  camDollyBy(THREE.MathUtils.clamp(e.deltaY, -120, 120) * 0.0015);
+}
+
+// Per-frame: nothing to do while dragging, otherwise coast out the
+// inertia left behind by the last rotate. dt is clamped so a
+// backgrounded tab cannot teleport the camera on return.
+function camUpdate() {
+  const now = performance.now();
+  const dt  = Math.min((now - camCtrl.lastT) / 1000, 0.1);
+  camCtrl.lastT = now;
+  if (camCtrl.mode !== 0 || camCtrl.spinSpeed < 1e-3) { camCtrl.spinSpeed = 0; return; }
+  _qDrag.setFromAxisAngle(camCtrl.spinAxis, camCtrl.spinSpeed * dt);
+  camOrbit(_qDrag, false);
+  camCtrl.spinSpeed *= Math.pow(0.04, dt);   // ~4% of the speed survives each second
+}
+
+canvas.addEventListener('pointerdown',   camPointerDown);
+canvas.addEventListener('pointermove',   camPointerMove);
+canvas.addEventListener('pointerup',     camPointerUp);
+canvas.addEventListener('pointercancel', camPointerUp);
+canvas.addEventListener('wheel',         camWheel, {passive: false});
+canvas.addEventListener('contextmenu',   e => e.preventDefault());
+
+camera.lookAt(camCtrl.target);
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.45));
 const kl = new THREE.DirectionalLight(0xd0c8ff, 1.4);
@@ -620,6 +832,7 @@ function updateMesh() {
 //  Presets
 // ============================================================
 function applyPreset(name) {
+  haltSpin();
   if (name === 'zero') {
     for (let i = 0; i < N_JOINTS; i++) for (let a = 0; a < 3; a++) setSlider(i, a, 0);
   }
@@ -680,8 +893,9 @@ function resetCameraToPalm() {
     center[2] + palmN[2] * dist,
   );
   camera.up.set(fwd[0], fwd[1], fwd[2]);
-  controls.target.set(center[0], center[1], center[2]);
-  controls.update();
+  camCtrl.target.set(center[0], center[1], center[2]);
+  camCtrl.spinSpeed = 0;                 // drop any in-flight coast
+  camera.lookAt(camCtrl.target);         // the arcball never re-aims by itself
 }
 
 // ============================================================
@@ -731,7 +945,9 @@ function renderGizmo() {
   // Mirror main camera's viewing direction so the gizmo XYZ rotates exactly as the scene does.
   camera.getWorldDirection(_camDir);              // direction camera is looking
   gizmoCamera.position.copy(_camDir).multiplyScalar(-3.5);
-  gizmoCamera.up.copy(camera.up);
+  // Take the up vector from the orientation, not from camera.up: the
+  // arcball lets the camera roll, so camera.up drifts out of date.
+  gizmoCamera.up.set(0, 1, 0).applyQuaternion(camera.quaternion);
   gizmoCamera.lookAt(0, 0, 0);
   gizmoRenderer.render(gizmoScene, gizmoCamera);
 }
@@ -751,6 +967,88 @@ function toggleTheme() {
 (() => { try { applyTheme(localStorage.getItem('mano-theme') || 'dark'); } catch { applyTheme('dark'); } })();
 
 // ============================================================
+//  Demo: sweep the index-finger PIP joint (joint 2) 0 → 360°
+//
+//  `pose[2]` is an axis-angle VECTOR, and rodrigues() only ever
+//  sees it through |r| -> cos/sin, so the rotation is periodic in
+//  the vector's magnitude. Driving θ = 0 → 2π therefore sweeps a
+//  full revolution and lands exactly back on identity at 360°.
+//
+//  The sliders only span ±π, so they physically cannot show a 2π
+//  value. The authoritative value is the continuous 0..2π angle we
+//  keep in `spin.ang`; the slider is only ever handed its wrapped
+//  equivalent (−π..π). That is the *same* rotation, so there is no
+//  visual jump when the user grabs the slider afterwards.
+//
+//  Timing is wall-clock (performance.now deltas), not per-frame,
+//  so 5°/s stays 5°/s no matter what the frame rate does.
+// ============================================================
+const SPIN_JOINT     = 2;                          // Index → jointIdx [1,2,3], k=1 → PIP
+const SPIN_AXIS      = 2;                          // 2 = Z
+const SPIN_TOTAL     = 2 * Math.PI;                // 360°
+const SPIN_RAD_S     = 5 * Math.PI / 180;          // 5°/s in rad/s
+const SPIN_IDLE_LABEL = 'Spin Index PIP (Z) · 0→360° @ 5°/s';
+
+const spin = { active: false, ang: 0, last: 0 };
+
+// Reflect a wrapped angle onto the ±π slider without touching `pose`
+function syncJointSlider(ji, axis, ang) {
+  const el  = document.getElementById(`sl_${ji}_${axis}`);
+  const vEl = document.getElementById(`v_${ji}_${axis}`);
+  if (!el) return;
+  let w = ang % (2 * Math.PI);
+  if (w >  Math.PI) w -= 2 * Math.PI;
+  if (w < -Math.PI) w += 2 * Math.PI;
+  el.value = w;
+  el.style.setProperty('--pct', ((w + RANGE) / (2 * RANGE) * 100).toFixed(1) + '%');
+  if (vEl) vEl.textContent = w.toFixed(2);
+}
+
+function setSpinLabel(ang) {
+  const b = document.getElementById('spin-pip');
+  if (!b) return;
+  b.textContent = (ang === null)
+    ? SPIN_IDLE_LABEL
+    : `■ Stop · ${(ang * 180 / Math.PI).toFixed(1)}°`;
+}
+
+// Stop the sweep but leave the joint wherever it currently is
+function haltSpin() {
+  if (!spin.active) return;
+  spin.active = false;
+  setSpinLabel(null);
+}
+
+function spinIndexPip() {
+  if (spin.active) { haltSpin(); return; }
+  spin.ang  = 0;
+  spin.last = performance.now();
+  spin.active = true;
+  setSpinLabel(0);
+}
+
+function stepSpin(now) {
+  // Clamp dt so a backgrounded tab doesn't teleport the joint on return
+  const dt = Math.min((now - spin.last) / 1000, 0.25);
+  spin.last = now;
+  spin.ang += SPIN_RAD_S * dt;
+
+  if (spin.ang >= SPIN_TOTAL) {          // full turn == identity, snap back to zero
+    spin.ang = 0;
+    pose[SPIN_JOINT][SPIN_AXIS] = 0;
+    syncJointSlider(SPIN_JOINT, SPIN_AXIS, 0);
+    haltSpin();
+    updateMesh();
+    return;
+  }
+
+  pose[SPIN_JOINT][SPIN_AXIS] = spin.ang;
+  syncJointSlider(SPIN_JOINT, SPIN_AXIS, spin.ang);
+  setSpinLabel(spin.ang);
+  updateMesh();
+}
+
+// ============================================================
 //  Resize / render
 // ============================================================
 function resize() {
@@ -764,7 +1062,8 @@ window.addEventListener('resize', resize);
 
 function animate() {
   requestAnimationFrame(animate);
-  controls.update();
+  camUpdate();
+  if (spin.active) stepSpin(performance.now());
   renderer.render(scene, camera);
   renderGizmo();
 }

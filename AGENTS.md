@@ -40,23 +40,22 @@ Both parsers log `[mano] …` diagnostics and **throw** on anything they do not 
 
 ## Architecture
 
-CSS 37–163, markup 165–229, one classic `<script>` 231–1121. Global mutable state plus direct DOM
+CSS 37–163, markup 165–231, one classic `<script>` 233–1415. Global mutable state plus direct DOM
 manipulation — there is no framework, no reactive layer, and inline `onclick="fn()"` attributes
 depend on those functions staying at top-level script scope (no IIFE wrapper).
 
-three.js is pinned to **r128** (`THREE` global, cdnjs) with OrbitControls 0.128.0 from jsDelivr's
-legacy `examples/js` path. `import`, `type="module"` and `defer` are not used anywhere and must
-not be introduced.
+three.js is pinned to **r128** (`THREE` global, cdnjs) and is the **only** external script.
+`import`, `type="module"` and `defer` are not used anywhere and must not be introduced.
 
 | Lines | Area |
 | --- | --- |
-| 241–316 | `FINGERS` joint table, `pose[16][3]`, imperative slider construction |
-| 319–416 | three.js scene, lights, skeleton spheres/bones, local-axis helpers |
-| 418–627 | MANO state, `activateMano()`, `rodrigues()`, `updateMesh()` (the LBS hot path) |
-| 629–771 | presets, view toggles, camera reset, XYZ gizmo (a **second** WebGL context), theme, render loop |
-| 773–999 | `parseManoBin()`, the hand-written pickle VM, `manoStructFromPickleDict()` |
-| 1001–1046 | IndexedDB cache |
-| 1048–1120 | modal status helpers, `ingest()`, bootstrap IIFE |
+| 241–320 | `FINGERS` joint table, `pose[16][3]`, imperative slider construction |
+| 322–624 | three.js scene, lights, skeleton spheres/bones, local-axis helpers, **trackball camera** |
+| 626–825 | MANO state, `activateMano()`, `rodrigues()`, `updateMesh()` (the LBS hot path) |
+| 827–1066 | presets, view toggles, camera reset, XYZ gizmo (a **second** WebGL context), theme, PIP spin demo, render loop |
+| 1068–1294 | `parseManoBin()`, the hand-written pickle VM, `manoStructFromPickleDict()` |
+| 1296–1340 | IndexedDB cache |
+| 1342–1415 | modal status helpers, `ingest()`, bootstrap IIFE |
 
 ## Domain conventions
 
@@ -64,11 +63,11 @@ not be introduced.
   **Pinky 7–9, Ring 10–12**, Thumb 13–15. Pinky-before-ring is the non-obvious part, and it is
   mirrored in `FINGERS`, the slider DOM, the sphere colors and the bone segments — change one and
   you change all four.
-- **`MANO_PARENTS` (index.html:968) is hardcoded on purpose.** The comment above it says
+- **`MANO_PARENTS` (index.html:1262) is hardcoded on purpose.** The comment above it says
   hardcoding beats "gambling on the pkl's kintree dtype / memory order". Do not "fix" it by
   reading `kintree_table`; that value is parsed only for a diagnostic log. It must stay in sync
   with `export_mano.py`, which does take parents from `kintree_table`.
-- **The pickle VM only implements protocol 2** (`index.html:799–936`). A pkl re-saved with
+- **The pickle VM only implements protocol 2** (`index.html:1119–1239`). A pkl re-saved with
   Python 3's default protocol throws `unsupported pickle opcode`. Extend the interpreter — do not
   swallow the error.
 - **The `.bin` layout is a cross-language contract**: the docstring in `export_mano.py` ↔
@@ -81,6 +80,15 @@ not be introduced.
 - **SEO strings must stay in sync.** Canonical, `og:url`, the JSON-LD `url`, the `Sitemap:` line
   in `robots.txt` and `<loc>` in `sitemap.xml` all carry the same absolute URL. The author/site
   metadata names the upstream project, not this fork.
+- **The camera is a hand-written trackball (`camOrbit`), not OrbitControls.** Do not re-add
+  OrbitControls: it derives its rotation axes from `camera.up`, and `resetCameraToPalm()` sets
+  `camera.up` to the palm/finger direction, so a "horizontal" drag would spin the hand about the
+  finger axis. The arcball works in screen space and never reads `camera.up`; `renderGizmo()`
+  likewise takes its up vector from `camera.quaternion`, not `camera.up`.
+- **The arcball delta in `camRotateTo()` is built with its arguments reversed**
+  (`rotationBetween(_vB, _vA)`). That turn carries the *surface* from A to B, i.e. the rotation an
+  object would need; we rotate the CAMERA instead, and turning the camera by q turns the model by
+  q⁻¹. Swap them back and every drag moves the hand the opposite way to the cursor.
 - UI copy is **English only** — there is no i18n layer.
 
 ## Pitfalls
@@ -96,6 +104,12 @@ not be introduced.
   origins — keep those guards rather than removing the "dead" error handling.
 - **`updateMesh()` must not allocate.** It reuses module-level scratch buffers (`R_local`,
   `G_rot`, `G_trans`, `T_trans`, `poseFeat`) on every slider `input` event.
+- **Never conjugate a quaternion you did not just normalise.** `conjugate()` is only the inverse
+  for an exactly-unit quaternion, and `multiply`/`premultiply` drift by ~1e-16 per call. Writing a
+  local rotation as `camQ · dq · camQ⁻¹` therefore drifts *cubically* (|q| → |q|³), so a few
+  hundred mouse moves reach 1e251 → `Infinity` → `NaN` and the camera is dead. `camOrbit()`
+  sidesteps it: post-multiply for a local rotation (no inverse needed), `normalize()` after, and
+  rebuild the position from the orientation instead of rotating the offset vector.
 - **Faces must end up in a `Uint32Array`** for three.js `BufferAttribute`. The `Number()`
   conversion that rescues `BigInt64Array` input is deliberate.
 - **`hands_mean` is parsed on both paths but never applied.** If you implement the mean pose, both
