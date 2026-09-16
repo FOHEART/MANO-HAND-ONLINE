@@ -1,0 +1,44 @@
+schema: spec-driven
+githubCopilot:
+  cloudAgent: true
+
+# Project context — shown to AI when creating artifacts.
+context: |
+  MANO Hand Viewer: a zero-build, single-file browser viewer for the MANO hand model
+  (index.html = CSS + markup + one classic <script>; no bundler, no framework, no package.json).
+
+  Stack: vanilla JS, three.js r128 as a global (no ES modules), Python 3.7+ stdlib-only dev
+  server (serve.py), plus an optional numpy script (export_mano.py). No tests, no linter, no CI;
+  verification is manual via the local server and the browser console.
+
+  Domain: MANO hand kinematics — 16 joints (wrist + 5 fingers x 3), axis-angle pose vectors,
+  linear blend skinning with pose blendshapes.
+
+  Hard constraints: the MANO model is non-commercial-licensed and must never be committed,
+  redistributed, or fetched from a server — users supply their own .pkl by drag-and-drop.
+  Keep the page openable from file:// (no fetch, no modules, no build step).
+
+  See AGENTS.md for architecture landmarks, conventions and pitfalls; do not duplicate it here.
+  Read README.md for the user-facing setup guide.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing
