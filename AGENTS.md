@@ -40,22 +40,28 @@ Both parsers log `[mano] …` diagnostics and **throw** on anything they do not 
 
 ## Architecture
 
-CSS 37–163, markup 165–231, one classic `<script>` 233–1415. Global mutable state plus direct DOM
-manipulation — there is no framework, no reactive layer, and inline `onclick="fn()"` attributes
-depend on those functions staying at top-level script scope (no IIFE wrapper).
+CSS 36–162, markup 164–229, then **two** classic scripts: `index.js` (loaded at 231, the
+`capBoundaryLoops()` wrist cap) and the inline script 232–1436. Global mutable state plus direct
+DOM manipulation — there is no framework, no reactive layer, and inline `onclick="fn()"`
+attributes depend on those functions staying at top-level script scope (no IIFE wrapper).
+
+`index.js` is a **classic** script, not a module, and must stay that way: it exists only to keep
+the wrist cap's design record next to its code. Nothing in it may use `import`/`export`, and
+nothing may depend on it running after the inline script — it is a plain global `function`
+declaration, so hoisting makes the order irrelevant, but keep it first for readability.
 
 three.js is pinned to **r128** (`THREE` global, cdnjs) and is the **only** external script.
 `import`, `type="module"` and `defer` are not used anywhere and must not be introduced.
 
 | Lines | Area |
 | --- | --- |
-| 241–320 | `FINGERS` joint table, `pose[16][3]`, imperative slider construction |
-| 322–624 | three.js scene, lights, skeleton spheres/bones, local-axis helpers, **trackball camera** |
-| 626–825 | MANO state, `activateMano()`, `rodrigues()`, `updateMesh()` (the LBS hot path) |
-| 827–1066 | presets, view toggles, camera reset, XYZ gizmo (a **second** WebGL context), theme, PIP spin demo, render loop |
-| 1068–1294 | `parseManoBin()`, the hand-written pickle VM, `manoStructFromPickleDict()` |
-| 1296–1340 | IndexedDB cache |
-| 1342–1415 | modal status helpers, `ingest()`, bootstrap IIFE |
+| 242–321 | `FINGERS` joint table, `pose[16][3]`, imperative slider construction |
+| 322–631 | three.js scene, lights, skeleton spheres/bones, local-axis helpers, **trackball camera** |
+| 632–849 | MANO state, `activateMano()`, `rodrigues()`, `updateMesh()` (the LBS hot path) |
+| 850–1086 | presets, view toggles, camera reset, XYZ gizmo (a **second** WebGL context), theme, PIP spin demo, render loop |
+| 1087–1310 | `parseManoBin()`, the hand-written pickle VM, `manoStructFromPickleDict()` |
+| 1311–1349 | IndexedDB cache |
+| 1350–1435 | modal status helpers, `ingest()`, bootstrap IIFE |
 
 ## Domain conventions
 
@@ -63,11 +69,11 @@ three.js is pinned to **r128** (`THREE` global, cdnjs) and is the **only** exter
   **Pinky 7–9, Ring 10–12**, Thumb 13–15. Pinky-before-ring is the non-obvious part, and it is
   mirrored in `FINGERS`, the slider DOM, the sphere colors and the bone segments — change one and
   you change all four.
-- **`MANO_PARENTS` (index.html:1262) is hardcoded on purpose.** The comment above it says
+- **`MANO_PARENTS` (index.html:1283) is hardcoded on purpose.** The comment above it says
   hardcoding beats "gambling on the pkl's kintree dtype / memory order". Do not "fix" it by
   reading `kintree_table`; that value is parsed only for a diagnostic log. It must stay in sync
   with `export_mano.py`, which does take parents from `kintree_table`.
-- **The pickle VM only implements protocol 2** (`index.html:1119–1239`). A pkl re-saved with
+- **The pickle VM only implements protocol 2** (`index.html:1140–1260`). A pkl re-saved with
   Python 3's default protocol throws `unsupported pickle opcode`. Extend the interpreter — do not
   swallow the error.
 - **The `.bin` layout is a cross-language contract**: the docstring in `export_mano.py` ↔
@@ -77,6 +83,12 @@ three.js is pinned to **r128** (`THREE` global, cdnjs) and is the **only** exter
 - **The theme system is CSS custom properties only** (`:root` + the `body.light` override).
   Never hardcode a color in a rule; per-slider colors flow through the `--fc` / `--pct` inline
   variables.
+- **The open wrist is capped at load by `capBoundaryLoops()` (index.js).** MANO's shell is
+  open at the wrist (one 16-vertex boundary loop, every vertex skinned 100% to joint 0). The cap
+  is a triangle fan emitted in **reverse loop order** — the loop taken in face order has its
+  Newell normal pointing *into* the solid, so a forward fan is backface-culled and silently
+  invisible. It adds triangles only, never vertices, so `posedV` / `outV` / `weights` and the LBS
+  hot path are untouched. `MANO.faces` stays pristine; the capped copy is what the geometry uses.
 - **SEO strings must stay in sync.** Canonical, `og:url`, the JSON-LD `url`, the `Sitemap:` line
   in `robots.txt` and `<loc>` in `sitemap.xml` all carry the same absolute URL. The author/site
   metadata names the upstream project, not this fork.

@@ -228,6 +228,7 @@ input[type=range]::-webkit-slider-runnable-track{height:3px;border-radius:2px;ba
   </div>
 </div>
 
+<script src="index.js"></script>
 <script>
 // ============================================================
 //  MANO joint layout (standard ordering used in MANO_RIGHT.pkl)
@@ -636,6 +637,18 @@ let mesh = null;
 let posedV = null;        // Float32Array (n_verts*3) — after pose blend
 let outV = null;          // Float32Array (n_verts*3) — after LBS
 
+// ============================================================
+//  Wrist cap
+//  The comment block that used to sit here — the design record
+//  for the 16-vertex wrist boundary loop, its convexity, the
+//  100%-to-joint-0 skinning and the REVERSE fan winding — now
+//  lives next to the code in `index.js`.
+//
+//  Loaded as a classic script above (no module, no defer) so
+//  `capBoundaryLoops` stays a plain global and the page keeps
+//  working from `file://`.
+// ============================================================
+
 function activateMano(manoStruct) {
   MANO = manoStruct;
   console.log('[mano] loaded', {
@@ -649,8 +662,11 @@ function activateMano(manoStruct) {
   posedV = new Float32Array(MANO.nV * 3);
   outV   = new Float32Array(MANO.nV * 3);
 
+  // Solidify the open wrist before handing the index to three.js.
+  const index = capBoundaryLoops(MANO.faces, MANO.nV);
+
   geometry = new THREE.BufferGeometry();
-  geometry.setIndex(new THREE.BufferAttribute(MANO.faces, 1));
+  geometry.setIndex(new THREE.BufferAttribute(index, 1));
   geometry.setAttribute('position', new THREE.BufferAttribute(outV, 3));
   geometry.attributes.position.setUsage(THREE.DynamicDrawUsage);
 
@@ -659,7 +675,7 @@ function activateMano(manoStruct) {
   mesh.receiveShadow = true;
   scene.add(mesh);
 
-  document.getElementById('status').textContent = `LOADED · ${MANO.nV}v ${MANO.faces.length/3}f`;
+  document.getElementById('status').textContent = `LOADED · ${MANO.nV}v ${index.length/3}f`;
   document.getElementById('clear-cache').style.display = 'inline';
   document.getElementById('modal').classList.add('hidden');
   updateMesh();
